@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
@@ -16,6 +17,8 @@ use std::io::{stdout, Stdout};
 use std::time::{Duration, Instant};
 
 mod buffer;
+mod edit;
+mod mode;
 mod navigation;
 mod parser;
 mod ui;
@@ -23,6 +26,8 @@ mod ui;
 use buffer::{Buffer, Cursor};
 use ui::viewport::Viewport;
 use parser::{Tokenizer, StructuralIndex};
+use mode::{Mode, ModeHandler, EditorContext, InputResult, normal::NormalMode, insert::InsertMode, RegisterMap, PendingOperator, StructuralNavAction};
+use edit::undo::UndoStack;
 use std::time::Instant as StdInstant;
 
 struct App {
@@ -36,8 +41,17 @@ struct App {
     structural_index: Option<StructuralIndex>,
     index_build_time: f64,
     current_node_id: Option<usize>, // Current node we're on
+    indexed_up_to_line: usize, // Last line that's been indexed
+    max_index_size_mb: usize, // Max memory for index (default 500MB)
     show_performance: bool, // Toggle performance overlay with F12
     frame_times: Vec<Duration>, // Track last 60 frame times
+    // Phase 1 additions
+    mode: Mode,
+    normal_mode_handler: NormalMode,
+    insert_mode_handler: InsertMode,
+    undo_stack: UndoStack,
+    register_map: RegisterMap,
+    pending_operator: Option<PendingOperator>,
 }
 
 impl App {
@@ -53,8 +67,17 @@ impl App {
             structural_index: None,
             index_build_time: 0.0,
             current_node_id: None,
+            indexed_up_to_line: 0,
+            max_index_size_mb: 500,
             show_performance: false,
             frame_times: Vec::with_capacity(60),
+            // Phase 1 initialization
+            mode: Mode::Normal,
+            normal_mode_handler: NormalMode::new(),
+            insert_mode_handler: InsertMode::new(),
+            undo_stack: UndoStack::new(),
+            register_map: RegisterMap::new(),
+            pending_operator: None,
         }
     }
 
@@ -67,17 +90,53 @@ impl App {
                   load_time.as_secs_f64(), 
                   self.buffer.line_count());
         
-        // Build structural index from visible portion for syntax highlighting
+        // Build structural index incrementally (start with first 10000 lines)
+        self.expand_structural_index(10000)?;
+        
+        Ok(())
+    }
+    
+    fn expand_structural_index(&mut self, target_line: usize) -> Result<()> {
+        let total_lines = self.buffer.line_count();
+        
+        // Already indexed enough
+        if self.indexed_up_to_line >= target_line.min(total_lines) {
+            return Ok(());
+        }
+        
         let index_start = StdInstant::now();
-        let visible_lines = self.buffer.get_visible_lines(0, 1000.min(self.buffer.line_count()));
-        let mut tokenizer = Tokenizer::new(visible_lines);
+        
+        // Index in chunks to avoid loading entire file at once
+        let chunk_size = 5000;
+        let start_line = self.indexed_up_to_line;
+        let end_line = (target_line + chunk_size).min(total_lines);
+        
+        // Get the text for this chunk
+        let chunk_text = self.buffer.get_visible_lines(start_line, end_line - start_line);
+        
+        // Tokenize the chunk
+        let mut tokenizer = Tokenizer::new(chunk_text);
         let tokens = tokenizer.tokenize_all();
-        self.structural_index = Some(StructuralIndex::from_tokens(&tokens));
+        
+        // If this is the first chunk, create new index
+        if self.structural_index.is_none() {
+            self.structural_index = Some(StructuralIndex::from_tokens(&tokens));
+        } else {
+            // Append to existing index (TODO: implement append in StructuralIndex)
+            // For now, rebuild from scratch with extended range
+            let extended_text = self.buffer.get_visible_lines(0, end_line);
+            let mut tokenizer = Tokenizer::new(extended_text);
+            let tokens = tokenizer.tokenize_all();
+            self.structural_index = Some(StructuralIndex::from_tokens(&tokens));
+        }
+        
+        self.indexed_up_to_line = end_line;
         self.index_build_time = index_start.elapsed().as_secs_f64();
         
-        eprintln!("Structural index built in {:.3}s ({} nodes)",
-                  self.index_build_time,
-                  self.structural_index.as_ref().map(|i| i.len()).unwrap_or(0));
+        eprintln!("Indexed up to line {} ({} nodes, {:.3}s)",
+                  end_line,
+                  self.structural_index.as_ref().map(|i| i.len()).unwrap_or(0),
+                  self.index_build_time);
         
         Ok(())
     }
@@ -90,48 +149,134 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Global shortcuts (work in all modes)
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true
-            }
-            KeyCode::Char('j') | KeyCode::Down => self.viewport.scroll_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.viewport.scroll_up(),
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.viewport.scroll_down_page()
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.viewport.scroll_up_page()
-            }
-            KeyCode::Char(']') => {
-                // Next sibling navigation - wait for 'j'
-                if let Ok(true) = event::poll(Duration::from_millis(100)) {
-                    if let Ok(Event::Key(next_key)) = event::read() {
-                        if next_key.code == KeyCode::Char('j') {
-                            self.navigate_next_sibling();
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('[') => {
-                // Previous sibling navigation - wait for 'j'
-                if let Ok(true) = event::poll(Duration::from_millis(100)) {
-                    if let Ok(Event::Key(next_key)) = event::read() {
-                        if next_key.code == KeyCode::Char('j') {
-                            self.navigate_prev_sibling();
-                        }
-                    }
-                }
+                self.should_quit = true;
+                return Ok(());
             }
             KeyCode::F(12) => {
                 self.show_performance = !self.show_performance;
+                return Ok(());
             }
             _ => {}
         }
+        
+        // Read current mode before borrowing
+        let current_mode = self.mode;
+        
+        // Create editor context for mode handlers
+        let ctx = EditorContext {
+            buffer: &mut self.buffer,
+            cursor: &mut self.cursor,
+            mode: &mut self.mode,
+            undo_stack: &mut self.undo_stack,
+            register_map: &mut self.register_map,
+            pending_operator: &mut self.pending_operator,
+        };
+        
+        // Route to appropriate mode handler based on saved mode value
+        let result = match current_mode {
+            Mode::Normal => self.normal_mode_handler.handle_key(key, ctx)?,
+            Mode::Insert => self.insert_mode_handler.handle_key(key, ctx)?,
+            Mode::Visual { .. } => {
+                // TODO: Implement visual mode
+                InputResult::NotHandled
+            }
+            Mode::Command => {
+                // TODO: Implement command mode
+                InputResult::NotHandled
+            }
+        };
+        
+        // Handle mode handler results
+        match result {
+            InputResult::Handled => {
+                // Update viewport to follow cursor
+                self.update_viewport_for_cursor();
+            }
+            InputResult::ModeSwitch(new_mode) => {
+                // Change cursor style based on mode
+                let mut out = stdout();
+                let _ = match new_mode {
+                    Mode::Normal => out.execute(SetCursorStyle::SteadyBlock),
+                    Mode::Insert => out.execute(SetCursorStyle::SteadyBar),
+                    Mode::Visual { .. } => out.execute(SetCursorStyle::SteadyBlock),
+                    Mode::Command => out.execute(SetCursorStyle::SteadyUnderScore),
+                };
+                
+                self.mode = new_mode;
+                // Update viewport to follow cursor
+                self.update_viewport_for_cursor();
+            }
+            InputResult::Quit => {
+                self.should_quit = true;
+            }
+            InputResult::StructuralNav(action) => {
+                match action {
+                    mode::StructuralNavAction::NextSibling => self.navigate_next_sibling(),
+                    mode::StructuralNavAction::PrevSibling => self.navigate_prev_sibling(),
+                }
+                self.update_viewport_for_cursor();
+            }
+            InputResult::ClearNodeTracking => {
+                // Cursor moved manually, invalidate cached node position
+                self.current_node_id = None;
+                self.update_viewport_for_cursor();
+            }
+            InputResult::NotHandled => {
+                // Fallback to structural navigation (kept from Phase 0)
+                match key.code {
+                    KeyCode::Char(']') if self.mode == Mode::Normal => {
+                        // Next sibling navigation - wait for 'j'
+                        if let Ok(true) = event::poll(Duration::from_millis(100)) {
+                            if let Ok(Event::Key(next_key)) = event::read() {
+                                if next_key.code == KeyCode::Char('j') {
+                                    self.navigate_next_sibling();
+                                    self.update_viewport_for_cursor();
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('[') if self.mode == Mode::Normal => {
+                        // Previous sibling navigation - wait for 'j'
+                        if let Ok(true) = event::poll(Duration::from_millis(100)) {
+                            if let Ok(Event::Key(next_key)) = event::read() {
+                                if next_key.code == KeyCode::Char('j') {
+                                    self.navigate_prev_sibling();
+                                    self.update_viewport_for_cursor();
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
         Ok(())
     }
     
+    fn update_viewport_for_cursor(&mut self) {
+        let viewport_height = self.viewport.height;
+        let cursor_line = self.cursor.line;
+        let start_line = self.viewport.start_line;
+        
+        // Keep cursor in view with some padding
+        if cursor_line < start_line {
+            // Cursor above viewport - scroll up
+            self.viewport.start_line = cursor_line;
+        } else if cursor_line >= start_line + viewport_height {
+            // Cursor below viewport - scroll down
+            self.viewport.start_line = cursor_line.saturating_sub(viewport_height - 1);
+        }
+    }
+    
     fn navigate_next_sibling(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000; // Look ahead
+        let _ = self.expand_structural_index(target_line);
+        
         if let Some(ref index) = self.structural_index {
             // Find current node or node at current byte offset
             let current_node = if let Some(node_id) = self.current_node_id {
@@ -155,18 +300,36 @@ impl App {
                 
                 // Get the actual node info
                 if let Some(next_node) = index.nodes().get(next_sibling_id) {
-                    self.cursor.set_byte_offset(next_node.start);
+                    // Update cursor byte offset
+                    self.cursor.byte_offset = next_node.start;
                     
-                    // Convert byte offset to line number and scroll viewport
+                    // Convert byte offset to line number
                     let target_line = self.buffer.byte_offset_to_line(next_node.start);
                     self.cursor.line = target_line;
-                    self.viewport.start_line = target_line.saturating_sub(5); // Center with some context
+                    
+                    // Calculate column within the line
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = next_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let len = c.len_utf8();
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
                 }
             }
         }
     }
     
     fn navigate_prev_sibling(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000; // Current region
+        let _ = self.expand_structural_index(target_line);
+        
         if let Some(ref index) = self.structural_index {
             // Find current node or node at current byte offset
             let current_node = if let Some(node_id) = self.current_node_id {
@@ -189,12 +352,26 @@ impl App {
                 
                 // Get the actual node info
                 if let Some(prev_node) = index.nodes().get(prev_sibling_id) {
-                    self.cursor.set_byte_offset(prev_node.start);
+                    // Update cursor byte offset
+                    self.cursor.byte_offset = prev_node.start;
                     
-                    // Convert byte offset to line number and scroll viewport
+                    // Convert byte offset to line number
                     let target_line = self.buffer.byte_offset_to_line(prev_node.start);
                     self.cursor.line = target_line;
-                    self.viewport.start_line = target_line.saturating_sub(5); // Center with some context
+                    
+                    // Calculate column within the line
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = prev_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let len = c.len_utf8();
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
                 }
             }
         }
@@ -352,6 +529,23 @@ fn render_ui(
         
         let inner_area = main_block.inner(chunks[0]);
         frame.render_widget(main_block, chunks[0]);
+        
+        // Update viewport height to match actual terminal size
+        let old_height = app.viewport.height;
+        app.viewport.height = inner_area.height as usize;
+        
+        // If height changed or cursor out of view, update viewport
+        if old_height != app.viewport.height || 
+           app.cursor.line < app.viewport.start_line ||
+           app.cursor.line >= app.viewport.start_line + app.viewport.height {
+            let cursor_line = app.cursor.line;
+            let viewport_height = app.viewport.height;
+            if cursor_line < app.viewport.start_line {
+                app.viewport.start_line = cursor_line;
+            } else if cursor_line >= app.viewport.start_line + viewport_height {
+                app.viewport.start_line = cursor_line.saturating_sub(viewport_height - 1);
+            }
+        }
 
         // Render buffer content with syntax highlighting
         let content = app.buffer.get_visible_lines(
@@ -370,6 +564,16 @@ fn render_ui(
         
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, inner_area);
+        
+        // Set cursor position for visibility
+        // Calculate cursor position relative to viewport
+        let cursor_screen_line = app.cursor.line.saturating_sub(app.viewport.start_line);
+        if cursor_screen_line < inner_area.height as usize {
+            // Cursor is visible in viewport
+            let cursor_x = inner_area.x + app.cursor.col as u16;
+            let cursor_y = inner_area.y + cursor_screen_line as u16;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
 
         // Status bar
         let status_text = if app.buffer.is_empty() {
@@ -399,14 +603,23 @@ fn render_ui(
             // Cursor position
             let cursor_pos = format!("{}:{}", app.cursor.line + 1, app.cursor.col + 1);
             
+            // Mode indicator (Phase 1)
+            let mode_indicator = app.mode.display();
+            let mode_str = if !mode_indicator.is_empty() {
+                format!(" {} |", mode_indicator)
+            } else {
+                String::new()
+            };
+            
             format!(
-                " {} ({}) | {}:{} | {}{} | FPS: {:.1} | F12: perf",
+                " {} ({}) | {}:{} | {}{} |{} FPS: {:.1} | F12: perf",
                 file_name,
                 file_size,
                 app.viewport.start_line + 1,
                 app.buffer.line_count(),
                 cursor_pos,
                 node_info,
+                mode_str,
                 app.fps
             )
         };
@@ -493,6 +706,7 @@ fn main() -> Result<()> {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
+        let _ = stdout().execute(SetCursorStyle::DefaultUserShape);
         let _ = stdout().execute(LeaveAlternateScreen);
         default_panic(info);
     }));
@@ -504,12 +718,16 @@ fn main() -> Result<()> {
     if args.len() > 1 {
         app.load_file(&args[1])?;
     }
+    
+    // Set initial cursor style (Normal mode = block)
+    stdout().execute(SetCursorStyle::SteadyBlock)?;
 
     let terminal = setup_terminal()?;
     let result = run(app, terminal);
     
-    // Restore terminal
+    // Restore terminal and cursor
     let terminal = setup_terminal()?;
+    stdout().execute(SetCursorStyle::DefaultUserShape)?;
     restore_terminal(terminal)?;
 
     result

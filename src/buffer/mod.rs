@@ -1,113 +1,51 @@
 pub mod cursor;
 
 use anyhow::Result;
-use std::collections::HashMap;
+use ropey::Rope;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::BufReader;
 use std::path::PathBuf;
 
 pub use cursor::Cursor;
 
 pub struct Buffer {
-    file: Option<File>,
+    rope: Rope,
     path: Option<PathBuf>,
-    file_size: usize,
-    line_offsets: Vec<u64>,  // Byte offset of each line start
-    line_cache: HashMap<usize, String>,  // LRU cache for lines
-    cache_size: usize,
+    modified: bool,
 }
 
 impl Buffer {
     pub fn new() -> Self {
         Self {
-            file: None,
+            rope: Rope::new(),
             path: None,
-            file_size: 0,
-            line_offsets: vec![0],  // First line starts at 0
-            line_cache: HashMap::new(),
-            cache_size: 1000,  // Cache up to 1000 lines
+            modified: false,
         }
     }
 
     pub fn load_file(&mut self, path: &str) -> Result<()> {
-        let file = File::open(path)?;
-        let metadata = file.metadata()?;
-        self.file_size = metadata.len() as usize;
-        
-        // Build line offset index by scanning file
-        self.build_line_index(path)?;
-        
-        // Keep file handle open for lazy reading
-        self.file = Some(File::open(path)?);
+        // Load entire file into rope
+        self.rope = Rope::from_reader(BufReader::new(File::open(path)?))?;
         self.path = Some(PathBuf::from(path));
-        
-        Ok(())
-    }
-    
-    fn build_line_index(&mut self, path: &str) -> Result<()> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        
-        self.line_offsets.clear();
-        self.line_offsets.push(0);
-        
-        let mut offset = 0u64;
-        for line_result in reader.lines() {
-            let line = line_result?;
-            // +1 for newline character
-            offset += line.len() as u64 + 1;
-            self.line_offsets.push(offset);
-        }
+        self.modified = false;
         
         Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.line_offsets.len() <= 1
+        self.rope.len_chars() == 0
     }
 
     pub fn line_count(&self) -> usize {
-        self.line_offsets.len().saturating_sub(1)
+        self.rope.len_lines()
     }
 
-    pub fn get_line(&mut self, line_idx: usize) -> String {
-        // Check cache first
-        if let Some(cached) = self.line_cache.get(&line_idx) {
-            return cached.clone();
-        }
-        
-        if line_idx >= self.line_offsets.len() - 1 {
+    pub fn get_line(&self, line_idx: usize) -> String {
+        if line_idx >= self.rope.len_lines() {
             return String::new();
         }
         
-        // Read from file
-        let start_offset = self.line_offsets[line_idx];
-        
-        let line = if let Some(ref mut file) = self.file {
-            if let Err(_) = file.seek(SeekFrom::Start(start_offset)) {
-                return String::new();
-            }
-            
-            let mut buf_reader = BufReader::new(file.try_clone().unwrap_or_else(|_| {
-                File::open(self.path.as_ref().unwrap()).unwrap()
-            }));
-            
-            let mut line_str = String::new();
-            match buf_reader.read_line(&mut line_str) {
-                Ok(_) => line_str,
-                Err(_) => return String::new(),
-            }
-        } else {
-            return String::new();
-        };
-        
-        // Cache the line
-        if self.line_cache.len() >= self.cache_size {
-            // Simple cache eviction: clear when full
-            self.line_cache.clear();
-        }
-        self.line_cache.insert(line_idx, line.clone());
-        line
+        self.rope.line(line_idx).to_string()
     }
 
     pub fn get_visible_lines(&mut self, start_line: usize, count: usize) -> String {
@@ -125,9 +63,8 @@ impl Buffer {
         result
     }
 
-
     pub fn file_size(&self) -> usize {
-        self.file_size
+        self.rope.len_bytes()
     }
 
     pub fn path(&self) -> Option<&PathBuf> {
@@ -135,18 +72,74 @@ impl Buffer {
     }
     
     pub fn len_bytes(&self) -> usize {
-        self.file_size
+        self.rope.len_bytes()
     }
     
-    /// Convert byte offset to line number using binary search
+    pub fn len_chars(&self) -> usize {
+        self.rope.len_chars()
+    }
+    
+    /// Convert byte offset to line number
     pub fn byte_offset_to_line(&self, byte_offset: usize) -> usize {
-        let offset = byte_offset as u64;
-        
-        // Binary search to find the line containing this byte offset
-        match self.line_offsets.binary_search(&offset) {
-            Ok(idx) => idx,  // Exact match
-            Err(idx) => idx.saturating_sub(1),  // Between two lines, take previous
+        self.rope.byte_to_line(byte_offset.min(self.rope.len_bytes()))
+    }
+    
+    /// Convert line number to byte offset
+    pub fn line_to_byte_offset(&self, line: usize) -> usize {
+        if line >= self.rope.len_lines() {
+            return self.rope.len_bytes();
         }
+        self.rope.line_to_byte(line)
+    }
+    
+    /// Check if buffer has been modified
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+    
+    /// Insert text at the given byte offset
+    pub fn insert(&mut self, offset: usize, text: &str) -> Result<()> {
+        let offset = offset.min(self.rope.len_bytes());
+        self.rope.insert(offset, text);
+        self.modified = true;
+        Ok(())
+    }
+    
+    /// Delete text in the given range [start, end)
+    pub fn delete(&mut self, start: usize, end: usize) -> Result<()> {
+        let start = start.min(self.rope.len_bytes());
+        let end = end.min(self.rope.len_bytes());
+        if start < end {
+            self.rope.remove(start..end);
+            self.modified = true;
+        }
+        Ok(())
+    }
+    
+    /// Replace text in range [start, end) with new_text
+    pub fn replace(&mut self, start: usize, end: usize, new_text: &str) -> Result<()> {
+        self.delete(start, end)?;
+        self.insert(start, new_text)?;
+        Ok(())
+    }
+    
+    /// Get a slice of text from the buffer
+    pub fn slice(&self, range: std::ops::Range<usize>) -> String {
+        let start = range.start.min(self.rope.len_bytes());
+        let end = range.end.min(self.rope.len_bytes());
+        if start >= end {
+            return String::new();
+        }
+        self.rope.byte_slice(start..end).to_string()
+    }
+    
+    /// Get character at byte offset
+    pub fn char_at(&self, byte_offset: usize) -> Option<char> {
+        if byte_offset >= self.rope.len_bytes() {
+            return None;
+        }
+        let char_idx = self.rope.byte_to_char(byte_offset);
+        self.rope.char(char_idx).into()
     }
 }
 

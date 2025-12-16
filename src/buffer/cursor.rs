@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 /// Cursor position in the buffer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
@@ -36,26 +34,57 @@ impl Cursor {
         }
     }
     
+    /// Sync byte_offset from current line and col position
+    fn sync_byte_offset(&mut self, buffer: &crate::buffer::Buffer) {
+        // Use buffer's rope to get correct byte offset for line start
+        let line_start_offset = buffer.line_to_byte_offset(self.line);
+        
+        // Get line text and clamp col to line length
+        let line_text = buffer.get_line(self.line);
+        let line_len_chars = line_text.chars().count();
+        if line_len_chars > 0 {
+            self.col = self.col.min(line_len_chars.saturating_sub(1));
+        } else {
+            self.col = 0;
+        }
+        
+        // Calculate byte offset within line (handle UTF-8)
+        let col_bytes: usize = line_text.chars().take(self.col).map(|c| c.len_utf8()).sum();
+        self.byte_offset = line_start_offset + col_bytes;
+    }
+    
     /// Move cursor to the next line
-    pub fn move_down(&mut self) {
-        self.line = self.line.saturating_add(1);
-        // Note: byte_offset should be recalculated by buffer
+    pub fn move_down(&mut self, buffer: &crate::buffer::Buffer) {
+        if self.line < buffer.line_count().saturating_sub(1) {
+            self.line = self.line.saturating_add(1);
+            self.sync_byte_offset(buffer);
+        }
     }
     
     /// Move cursor to the previous line
-    pub fn move_up(&mut self) {
-        self.line = self.line.saturating_sub(1);
-        // Note: byte_offset should be recalculated by buffer
+    pub fn move_up(&mut self, buffer: &crate::buffer::Buffer) {
+        if self.line > 0 {
+            self.line = self.line.saturating_sub(1);
+            self.sync_byte_offset(buffer);
+        }
     }
     
     /// Move cursor right one character
-    pub fn move_right(&mut self) {
-        self.col = self.col.saturating_add(1);
+    pub fn move_right(&mut self, buffer: &crate::buffer::Buffer) {
+        let line_text = buffer.get_line(self.line);
+        let line_len = line_text.chars().count();
+        if self.col < line_len.saturating_sub(1) {
+            self.col = self.col.saturating_add(1);
+            self.sync_byte_offset(buffer);
+        }
     }
     
     /// Move cursor left one character
-    pub fn move_left(&mut self) {
-        self.col = self.col.saturating_sub(1);
+    pub fn move_left(&mut self, buffer: &crate::buffer::Buffer) {
+        if self.col > 0 {
+            self.col = self.col.saturating_sub(1);
+            self.sync_byte_offset(buffer);
+        }
     }
     
     /// Move to start of line
@@ -77,6 +106,20 @@ impl Cursor {
     /// Set byte offset and mark line/col for recalculation
     pub fn set_byte_offset(&mut self, offset: usize) {
         self.byte_offset = offset;
+    }
+    
+    /// Move cursor to start of line (alias for mode handlers)
+    pub fn move_start_of_line(&mut self, buffer: &crate::buffer::Buffer) {
+        self.col = 0;
+        self.sync_byte_offset(buffer);
+    }
+    
+    /// Move cursor to end of line (alias for mode handlers)
+    pub fn move_end_of_line(&mut self, buffer: &crate::buffer::Buffer) {
+        let line_text = buffer.get_line(self.line);
+        let line_len = line_text.chars().count();
+        self.col = line_len.saturating_sub(1).max(0);
+        self.sync_byte_offset(buffer);
     }
 }
 

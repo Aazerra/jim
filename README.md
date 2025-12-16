@@ -9,7 +9,42 @@
 
 ## Features
 
-### Current (Phase 0 - v0.1.0-alpha)
+### Current (Phase 1 COMPLETE ✅)
+
+✅ **Vim Operators & Motions (NEW - Week 9)**
+- `d{motion}` - Delete: `dd`, `dw`, `diw`, `di"`
+- `c{motion}` - Change: `cc`, `cw`, `ciw`, `ci"`
+- `y{motion}` - Yank: `yy`, `yw`, `yiw`, `yi"`
+- `p` / `P` - Paste after/before cursor
+- `x` / `X` - Delete single character
+- Word motions: `w`, `b`, `e`
+- Text objects: `iw`, `aw`, `i"`, `a"`
+
+✅ **Register System (NEW - Week 9)**
+- Unnamed register for all operations
+- Named registers `"a-"z` for explicit storage
+- Yank register `"0` preserves last yank
+- Small delete register `"-` for <1 line deletions
+
+✅ **Full Text Editing**
+- Rope-based buffer for O(log n) operations
+- Real-time character insertion/deletion
+- Multi-line editing with Enter
+- Backspace/Delete works correctly
+- Automatic cursor position tracking
+
+✅ **Vim-like Modal Editing**
+- Normal mode for navigation and commands
+- Insert mode for text editing
+- Mode indicator in status bar
+- Smooth mode transitions (i, a, o, O, A, I, ESC)
+
+✅ **Undo/Redo System**
+- `u` to undo, `Ctrl-R` to redo
+- Transaction-based edit grouping
+- Automatic grouping in insert mode
+- Up to 1000 undo levels
+- Cursor position restoration
 
 ✅ **Lazy File Loading**
 - Opens 100MB files in 0.23s

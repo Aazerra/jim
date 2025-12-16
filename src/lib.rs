@@ -1,4 +1,6 @@
 pub mod buffer;
+pub mod edit;
+pub mod mode;
 pub mod navigation;
 pub mod parser;
 pub mod ui;
