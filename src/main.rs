@@ -49,6 +49,8 @@ struct App {
     mode: Mode,
     normal_mode_handler: NormalMode,
     insert_mode_handler: InsertMode,
+    visual_mode_handler: Option<mode::visual::VisualMode>,
+    command_mode_handler: mode::command::CommandMode,
     undo_stack: UndoStack,
     register_map: RegisterMap,
     pending_operator: Option<PendingOperator>,
@@ -75,6 +77,8 @@ impl App {
             mode: Mode::Normal,
             normal_mode_handler: NormalMode::new(),
             insert_mode_handler: InsertMode::new(),
+            visual_mode_handler: None,
+            command_mode_handler: mode::command::CommandMode::new(),
             undo_stack: UndoStack::new(),
             register_map: RegisterMap::new(),
             pending_operator: None,
@@ -165,6 +169,9 @@ impl App {
         // Read current mode before borrowing
         let current_mode = self.mode;
         
+        // Capture cursor offset before borrowing (needed for visual mode initialization)
+        let cursor_offset = self.cursor.byte_offset;
+        
         // Create editor context for mode handlers
         let ctx = EditorContext {
             buffer: &mut self.buffer,
@@ -173,19 +180,30 @@ impl App {
             undo_stack: &mut self.undo_stack,
             register_map: &mut self.register_map,
             pending_operator: &mut self.pending_operator,
+            structural_index: self.structural_index.as_ref(),
         };
         
         // Route to appropriate mode handler based on saved mode value
         let result = match current_mode {
             Mode::Normal => self.normal_mode_handler.handle_key(key, ctx)?,
             Mode::Insert => self.insert_mode_handler.handle_key(key, ctx)?,
-            Mode::Visual { .. } => {
-                // TODO: Implement visual mode
-                InputResult::NotHandled
+            Mode::Visual { line_wise } => {
+                // Initialize visual mode if not already active
+                if self.visual_mode_handler.is_none() {
+                    self.visual_mode_handler = Some(mode::visual::VisualMode::new(
+                        cursor_offset,
+                        line_wise,
+                    ));
+                }
+                
+                if let Some(ref mut handler) = self.visual_mode_handler {
+                    handler.handle_key(key, ctx)?
+                } else {
+                    InputResult::NotHandled
+                }
             }
             Mode::Command => {
-                // TODO: Implement command mode
-                InputResult::NotHandled
+                self.command_mode_handler.handle_key(key, ctx)?
             }
         };
         
@@ -196,6 +214,11 @@ impl App {
                 self.update_viewport_for_cursor();
             }
             InputResult::ModeSwitch(new_mode) => {
+                // Clear visual mode handler when leaving visual mode
+                if !matches!(new_mode, Mode::Visual { .. }) {
+                    self.visual_mode_handler = None;
+                }
+                
                 // Change cursor style based on mode
                 let mut out = stdout();
                 let _ = match new_mode {
@@ -216,6 +239,12 @@ impl App {
                 match action {
                     mode::StructuralNavAction::NextSibling => self.navigate_next_sibling(),
                     mode::StructuralNavAction::PrevSibling => self.navigate_prev_sibling(),
+                    mode::StructuralNavAction::Parent => self.navigate_parent(),
+                    mode::StructuralNavAction::FirstChild => self.navigate_first_child(),
+                    mode::StructuralNavAction::NextKey => self.navigate_next_key(),
+                    mode::StructuralNavAction::PrevKey => self.navigate_prev_key(),
+                    mode::StructuralNavAction::NextValue => self.navigate_next_value(),
+                    mode::StructuralNavAction::PrevValue => self.navigate_prev_value(),
                 }
                 self.update_viewport_for_cursor();
             }
@@ -365,6 +394,214 @@ impl App {
                     let line_text = self.buffer.get_line(target_line);
                     let col = line_text.chars().take_while(|c| {
                         let len = c.len_utf8();
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
+                }
+            }
+        }
+    }
+    
+    fn navigate_parent(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000;
+        let _ = self.expand_structural_index(target_line);
+        
+        if let Some(ref index) = self.structural_index {
+            // Find current node
+            let current_node = if let Some(node_id) = self.current_node_id {
+                node_id
+            } else {
+                if let Some(node) = index.node_at(self.cursor.byte_offset) {
+                    let node_id = index.nodes().iter().position(|n| n.start == node.start).unwrap_or(0);
+                    self.current_node_id = Some(node_id);
+                    node_id
+                } else {
+                    return;
+                }
+            };
+            
+            // Get parent node
+            if let Some(parent_id) = index.parent(current_node) {
+                self.current_node_id = Some(parent_id);
+                
+                if let Some(parent_node) = index.nodes().get(parent_id) {
+                    self.cursor.byte_offset = parent_node.start;
+                    let target_line = self.buffer.byte_offset_to_line(parent_node.start);
+                    self.cursor.line = target_line;
+                    
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = parent_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
+                }
+            }
+        }
+    }
+    
+    fn navigate_first_child(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000;
+        let _ = self.expand_structural_index(target_line);
+        
+        if let Some(ref index) = self.structural_index {
+            // Find current node
+            let current_node = if let Some(node_id) = self.current_node_id {
+                node_id
+            } else {
+                if let Some(node) = index.node_at(self.cursor.byte_offset) {
+                    let node_id = index.nodes().iter().position(|n| n.start == node.start).unwrap_or(0);
+                    self.current_node_id = Some(node_id);
+                    node_id
+                } else {
+                    return;
+                }
+            };
+            
+            // Get first child
+            if let Some(child_id) = index.first_child(current_node) {
+                self.current_node_id = Some(child_id);
+                
+                if let Some(child_node) = index.nodes().get(child_id) {
+                    self.cursor.byte_offset = child_node.start;
+                    let target_line = self.buffer.byte_offset_to_line(child_node.start);
+                    self.cursor.line = target_line;
+                    
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = child_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
+                }
+            }
+        }
+    }
+    
+    fn navigate_next_key(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000;
+        let _ = self.expand_structural_index(target_line);
+        
+        if let Some(ref index) = self.structural_index {
+            if let Some(next_key_id) = index.next_key(self.cursor.byte_offset) {
+                self.current_node_id = Some(next_key_id);
+                
+                if let Some(key_node) = index.nodes().get(next_key_id) {
+                    self.cursor.byte_offset = key_node.start;
+                    let target_line = self.buffer.byte_offset_to_line(key_node.start);
+                    self.cursor.line = target_line;
+                    
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = key_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
+                }
+            }
+        }
+    }
+    
+    fn navigate_prev_key(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000;
+        let _ = self.expand_structural_index(target_line);
+        
+        if let Some(ref index) = self.structural_index {
+            if let Some(prev_key_id) = index.prev_key(self.cursor.byte_offset) {
+                self.current_node_id = Some(prev_key_id);
+                
+                if let Some(key_node) = index.nodes().get(prev_key_id) {
+                    self.cursor.byte_offset = key_node.start;
+                    let target_line = self.buffer.byte_offset_to_line(key_node.start);
+                    self.cursor.line = target_line;
+                    
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = key_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
+                }
+            }
+        }
+    }
+    
+    fn navigate_next_value(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000;
+        let _ = self.expand_structural_index(target_line);
+        
+        if let Some(ref index) = self.structural_index {
+            if let Some(next_value_id) = index.next_value(self.cursor.byte_offset) {
+                self.current_node_id = Some(next_value_id);
+                
+                if let Some(value_node) = index.nodes().get(next_value_id) {
+                    self.cursor.byte_offset = value_node.start;
+                    let target_line = self.buffer.byte_offset_to_line(value_node.start);
+                    self.cursor.line = target_line;
+                    
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = value_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
+                        let current_bytes: usize = line_text.chars()
+                            .take_while(|ch| ch != c)
+                            .map(|ch| ch.len_utf8())
+                            .sum();
+                        current_bytes < offset_in_line
+                    }).count();
+                    self.cursor.col = col;
+                }
+            }
+        }
+    }
+    
+    fn navigate_prev_value(&mut self) {
+        // Ensure we've indexed enough of the file
+        let target_line = self.cursor.line + 1000;
+        let _ = self.expand_structural_index(target_line);
+        
+        if let Some(ref index) = self.structural_index {
+            if let Some(prev_value_id) = index.prev_value(self.cursor.byte_offset) {
+                self.current_node_id = Some(prev_value_id);
+                
+                if let Some(value_node) = index.nodes().get(prev_value_id) {
+                    self.cursor.byte_offset = value_node.start;
+                    let target_line = self.buffer.byte_offset_to_line(value_node.start);
+                    self.cursor.line = target_line;
+                    
+                    let line_start_offset = self.buffer.line_to_byte_offset(target_line);
+                    let offset_in_line = value_node.start - line_start_offset;
+                    let line_text = self.buffer.get_line(target_line);
+                    let col = line_text.chars().take_while(|c| {
                         let current_bytes: usize = line_text.chars()
                             .take_while(|ch| ch != c)
                             .map(|ch| ch.len_utf8())
@@ -611,9 +848,13 @@ fn render_ui(
                 String::new()
             };
             
+            // Modified indicator
+            let modified = if app.buffer.is_modified() { " [+]" } else { "" };
+            
             format!(
-                " {} ({}) | {}:{} | {}{} |{} FPS: {:.1} | F12: perf",
+                " {}{} ({}) | {}:{} | {}{} |{} FPS: {:.1} | F12: perf",
                 file_name,
+                modified,
                 file_size,
                 app.viewport.start_line + 1,
                 app.buffer.line_count(),
@@ -627,6 +868,28 @@ fn render_ui(
         let status = Paragraph::new(status_text)
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
         frame.render_widget(status, chunks[1]);
+        
+        // Command line (when in command mode)
+        if matches!(app.mode, Mode::Command) {
+            let cmd_text = format!(":{}", app.command_mode_handler.command_line);
+            let cmd_len = cmd_text.len();
+            let cmd_line = Paragraph::new(cmd_text)
+                .style(Style::default().bg(Color::Black).fg(Color::White));
+            
+            // Render at the bottom of the status bar area
+            let cmd_area = ratatui::layout::Rect {
+                x: chunks[1].x,
+                y: chunks[1].y,
+                width: chunks[1].width,
+                height: 1,
+            };
+            frame.render_widget(cmd_line, cmd_area);
+            
+            // Set cursor position at end of command line
+            let cursor_x = chunks[1].x + cmd_len as u16;
+            let cursor_y = chunks[1].y;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
         
         // Performance overlay (toggle with F12)
         if app.show_performance {

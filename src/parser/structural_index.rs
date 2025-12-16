@@ -206,6 +206,25 @@ impl StructuralIndex {
     pub fn parent(&self, node_id: NodeId) -> Option<NodeId> {
         self.nodes.get(node_id)?.parent
     }
+    
+    /// Get first child of a container node
+    pub fn first_child(&self, node_id: NodeId) -> Option<NodeId> {
+        let node = self.nodes.get(node_id)?;
+        let child_depth = node.depth + 1;
+        
+        // Find first node with depth = parent_depth + 1 and parent = node_id
+        for (idx, n) in self.nodes.iter().enumerate().skip(node_id + 1) {
+            if n.parent == Some(node_id) && n.depth == child_depth {
+                return Some(idx);
+            }
+            // Stop if we've left the container
+            if n.depth <= node.depth {
+                break;
+            }
+        }
+        
+        None
+    }
 
     /// Get all children of a container node
     pub fn children(&self, node_id: NodeId) -> Vec<NodeId> {
@@ -241,6 +260,123 @@ impl StructuralIndex {
 
     pub fn nodes(&self) -> &[NodeInfo] {
         &self.nodes
+    }
+    
+    /// Find the next key node after the given offset
+    /// Keys are String nodes that are direct children of Object nodes
+    pub fn next_key(&self, from_offset: usize) -> Option<NodeId> {
+        // Find all String nodes that are object keys (odd-indexed children of objects)
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if node.start <= from_offset {
+                continue;
+            }
+            
+            // Check if this is a key (String node in an object)
+            if node.kind == NodeKind::String {
+                if let Some(parent_id) = node.parent {
+                    if let Some(parent) = self.nodes.get(parent_id) {
+                        if parent.kind == NodeKind::Object {
+                            // In JSON objects, keys are strings at even positions among siblings
+                            // Check if this is at a key position
+                            let siblings: Vec<_> = self.children(parent_id);
+                            if let Some(pos) = siblings.iter().position(|&id| id == idx) {
+                                if pos % 2 == 0 {
+                                    return Some(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    /// Find the previous key node before the given offset
+    pub fn prev_key(&self, from_offset: usize) -> Option<NodeId> {
+        let mut result = None;
+        
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if node.start >= from_offset {
+                break;
+            }
+            
+            // Check if this is a key
+            if node.kind == NodeKind::String {
+                if let Some(parent_id) = node.parent {
+                    if let Some(parent) = self.nodes.get(parent_id) {
+                        if parent.kind == NodeKind::Object {
+                            let siblings: Vec<_> = self.children(parent_id);
+                            if let Some(pos) = siblings.iter().position(|&id| id == idx) {
+                                if pos % 2 == 0 {
+                                    result = Some(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+    
+    /// Find the next value node after the given offset
+    /// Values can be any node type that's not a key
+    pub fn next_value(&self, from_offset: usize) -> Option<NodeId> {
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if node.start <= from_offset {
+                continue;
+            }
+            
+            // Check if this is a value node
+            if self.is_value_node(idx) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+    
+    /// Find the previous value node before the given offset
+    pub fn prev_value(&self, from_offset: usize) -> Option<NodeId> {
+        let mut result = None;
+        
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if node.start >= from_offset {
+                break;
+            }
+            
+            if self.is_value_node(idx) {
+                result = Some(idx);
+            }
+        }
+        result
+    }
+    
+    /// Check if a node is a value (not a key in an object)
+    fn is_value_node(&self, node_id: NodeId) -> bool {
+        let node = match self.nodes.get(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        
+        // If parent is an object, check if this is an odd-indexed child (value position)
+        if let Some(parent_id) = node.parent {
+            if let Some(parent) = self.nodes.get(parent_id) {
+                if parent.kind == NodeKind::Object {
+                    let siblings: Vec<_> = self.children(parent_id);
+                    if let Some(pos) = siblings.iter().position(|&id| id == node_id) {
+                        // Odd positions are values in objects
+                        return pos % 2 == 1;
+                    }
+                } else if parent.kind == NodeKind::Array {
+                    // All children of arrays are values
+                    return true;
+                }
+            }
+        }
+        
+        // Top-level nodes are values
+        node.parent.is_none()
     }
 }
 

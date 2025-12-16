@@ -209,7 +209,19 @@ impl Motion {
                     Ok(start..start)
                 }
             }
-            _ => Ok(start..start), // TODO: Implement other text objects
+            TextObject::Braces { inner } | TextObject::Brackets { inner } => {
+                // Find enclosing {} or []
+                let text = buffer.slice(0..buffer.len_bytes());
+                let open_char = if matches!(obj, TextObject::Braces { .. }) { '{' } else { '[' };
+                let close_char = if matches!(obj, TextObject::Braces { .. }) { '}' } else { ']' };
+                
+                if let Some(range) = Self::find_matching_brackets(&text, start, open_char, close_char, *inner) {
+                    Ok(range)
+                } else {
+                    Ok(start..start)
+                }
+            }
+            _ => Ok(start..start), // Other text objects not yet implemented
         }
     }
     
@@ -241,6 +253,60 @@ impl Motion {
             Some((start + 1)..(end - 1))
         } else {
             Some(start..end)
+        }
+    }
+    
+    fn find_matching_brackets(text: &str, pos: usize, open: char, close: char, inner: bool) -> Option<std::ops::Range<usize>> {
+        let chars: Vec<char> = text.chars().collect();
+        let byte_to_char: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        let char_pos = text[..pos.min(text.len())].chars().count();
+        
+        // Find opening bracket by searching backward
+        let mut depth = 0;
+        let mut start_char = None;
+        for i in (0..=char_pos).rev() {
+            if i < chars.len() {
+                if chars[i] == close {
+                    depth += 1;
+                } else if chars[i] == open {
+                    if depth == 0 {
+                        start_char = Some(i);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        
+        let start_char = start_char?;
+        
+        // Find closing bracket by searching forward
+        depth = 0;
+        let mut end_char = None;
+        for i in start_char..chars.len() {
+            if chars[i] == open {
+                depth += 1;
+            } else if chars[i] == close {
+                depth -= 1;
+                if depth == 0 {
+                    end_char = Some(i);
+                    break;
+                }
+            }
+        }
+        
+        let end_char = end_char?;
+        
+        // Convert char indices to byte indices
+        let start_byte = byte_to_char.get(start_char).copied().unwrap_or(0);
+        let end_byte = byte_to_char.get(end_char + 1).copied().unwrap_or(text.len());
+        
+        if inner {
+            // Exclude brackets
+            let inner_start = byte_to_char.get(start_char + 1).copied().unwrap_or(start_byte);
+            Some(inner_start..byte_to_char.get(end_char).copied().unwrap_or(end_byte))
+        } else {
+            Some(start_byte..end_byte)
         }
     }
 }

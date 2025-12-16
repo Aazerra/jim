@@ -35,7 +35,7 @@ impl Cursor {
     }
     
     /// Sync byte_offset from current line and col position
-    fn sync_byte_offset(&mut self, buffer: &crate::buffer::Buffer) {
+    pub fn sync_byte_offset(&mut self, buffer: &crate::buffer::Buffer) {
         // Use buffer's rope to get correct byte offset for line start
         let line_start_offset = buffer.line_to_byte_offset(self.line);
         

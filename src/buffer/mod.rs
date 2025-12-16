@@ -141,6 +141,31 @@ impl Buffer {
         let char_idx = self.rope.byte_to_char(byte_offset);
         self.rope.char(char_idx).into()
     }
+    
+    /// Save buffer to file
+    pub fn save(&mut self) -> Result<()> {
+        if let Some(path) = &self.path {
+            use std::io::Write;
+            let mut file = std::fs::File::create(path)?;
+            
+            // Write rope contents to file efficiently
+            for chunk in self.rope.chunks() {
+                file.write_all(chunk.as_bytes())?;
+            }
+            file.flush()?;
+            
+            self.modified = false;
+            Ok(())
+        } else {
+            anyhow::bail!("No file path set")
+        }
+    }
+    
+    /// Save buffer to a specific path
+    pub fn save_as(&mut self, path: &str) -> Result<()> {
+        self.path = Some(PathBuf::from(path));
+        self.save()
+    }
 }
 
 impl Default for Buffer {

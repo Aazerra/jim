@@ -63,14 +63,14 @@ impl ModeHandler for InsertMode {
                 Ok(InputResult::Handled)
             }
             
-            // Tab - insert tab or spaces
+            // Tab - insert 4 spaces
             (KeyCode::Tab, _) => {
-                // Insert tab character at cursor position
+                // Insert 4 spaces at cursor position
                 let edit = EditOperations::insert(
                     ctx.buffer,
                     ctx.cursor,
                     ctx.cursor.byte_offset,
-                    "\t",
+                    "    ",
                 )?;
                 
                 // Track edit for undo
@@ -116,12 +116,6 @@ impl ModeHandler for InsertMode {
                     // Track edit for undo
                     ctx.undo_stack.push(edit);
                 }
-                Ok(InputResult::Handled)
-            }
-            
-            // Tab
-            (KeyCode::Tab, _) => {
-                // TODO: Insert tab/spaces
                 Ok(InputResult::Handled)
             }
             

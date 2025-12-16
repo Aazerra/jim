@@ -3,6 +3,8 @@ use crossterm::event::KeyEvent;
 
 pub mod normal;
 pub mod insert;
+pub mod visual;
+pub mod command;
 pub mod operator;
 pub mod register;
 
@@ -43,6 +45,7 @@ pub struct EditorContext<'a> {
     pub undo_stack: &'a mut UndoStack,
     pub register_map: &'a mut RegisterMap,
     pub pending_operator: &'a mut Option<PendingOperator>,
+    pub structural_index: Option<&'a crate::parser::StructuralIndex>,
 }
 
 /// Result of handling an input event
@@ -67,6 +70,12 @@ pub enum InputResult {
 pub enum StructuralNavAction {
     NextSibling,
     PrevSibling,
+    Parent,
+    FirstChild,
+    NextKey,
+    PrevKey,
+    NextValue,
+    PrevValue,
 }
 
 /// Trait for mode-specific input handlers

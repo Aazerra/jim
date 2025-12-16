@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, Event};
 
 use super::{EditorContext, InputResult, ModeHandler, Mode, StructuralNavAction};
 use super::operator::{Operator, Motion, Direction, WordMotion, PendingOperator};
@@ -90,6 +90,31 @@ impl ModeHandler for NormalMode {
                 Ok(InputResult::ClearNodeTracking)
             }
             
+            // Command mode
+            (KeyCode::Char(':'), _) => {
+                Ok(InputResult::ModeSwitch(Mode::Command))
+            }
+            
+            // Text object handlers (must be before 'i' and 'a' insert mode handlers)
+            (KeyCode::Char('i'), KeyModifiers::NONE) if ctx.pending_operator.is_some() => {
+                // Inner text object - wait for next key
+                self.handle_text_object(true, &mut ctx)?;
+                Ok(InputResult::Handled)
+            }
+            (KeyCode::Char('a'), KeyModifiers::NONE) if ctx.pending_operator.is_some() => {
+                // Around text object - wait for next key
+                self.handle_text_object(false, &mut ctx)?;
+                Ok(InputResult::Handled)
+            }
+            
+            // Visual mode
+            (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                Ok(InputResult::ModeSwitch(Mode::Visual { line_wise: false }))
+            }
+            (KeyCode::Char('V'), KeyModifiers::SHIFT) => {
+                Ok(InputResult::ModeSwitch(Mode::Visual { line_wise: true }))
+            }
+            
             // Enter insert mode commands
             (KeyCode::Char('i'), KeyModifiers::NONE) => {
                 // Insert before cursor - no cursor movement needed
@@ -139,12 +164,64 @@ impl ModeHandler for NormalMode {
                 Ok(InputResult::Handled)
             }
             
-            // Structural navigation - Ctrl+j (next) and Ctrl+k (prev)
+            // Structural navigation
             (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                // Ctrl+j - next sibling
                 Ok(InputResult::StructuralNav(StructuralNavAction::NextSibling))
             }
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                // Ctrl+k - prev sibling  
                 Ok(InputResult::StructuralNav(StructuralNavAction::PrevSibling))
+            }
+            (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
+                // Ctrl+h - parent (move out)
+                Ok(InputResult::StructuralNav(StructuralNavAction::Parent))
+            }
+            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+                // Ctrl+l - first child (move in)
+                Ok(InputResult::StructuralNav(StructuralNavAction::FirstChild))
+            }
+            
+            // Key/Value navigation with two-key sequences
+            (KeyCode::Char(']'), KeyModifiers::NONE) => {
+                // Wait for second key: 'l' for next key, 'v' for next value
+                use crossterm::event;
+                use std::time::Duration;
+                
+                if let Ok(true) = event::poll(Duration::from_millis(500)) {
+                    if let Ok(Event::Key(next_key)) = event::read() {
+                        match next_key.code {
+                            KeyCode::Char('l') => {
+                                return Ok(InputResult::StructuralNav(StructuralNavAction::NextKey));
+                            }
+                            KeyCode::Char('v') => {
+                                return Ok(InputResult::StructuralNav(StructuralNavAction::NextValue));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(InputResult::NotHandled)
+            }
+            (KeyCode::Char('['), KeyModifiers::NONE) => {
+                // Wait for second key: 'l' for prev key, 'v' for prev value
+                use crossterm::event;
+                use std::time::Duration;
+                
+                if let Ok(true) = event::poll(Duration::from_millis(500)) {
+                    if let Ok(Event::Key(next_key)) = event::read() {
+                        match next_key.code {
+                            KeyCode::Char('l') => {
+                                return Ok(InputResult::StructuralNav(StructuralNavAction::PrevKey));
+                            }
+                            KeyCode::Char('v') => {
+                                return Ok(InputResult::StructuralNav(StructuralNavAction::PrevValue));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(InputResult::NotHandled)
             }
             
             // Page navigation
@@ -326,5 +403,35 @@ impl ModeHandler for NormalMode {
             
             _ => Ok(InputResult::NotHandled),
         }
+    }
+}
+
+// Helper methods for NormalMode
+impl NormalMode {
+    /// Handle text object selection (iw, aw, i{, a{, etc.)
+    fn handle_text_object(&mut self, inner: bool, ctx: &mut EditorContext) -> Result<()> {
+        use crossterm::event;
+        use std::time::Duration;
+        
+        // Wait for next key to determine which text object
+        if let Ok(true) = event::poll(Duration::from_millis(500)) {
+            if let Ok(Event::Key(key)) = event::read() {
+                let text_object = match key.code {
+                    KeyCode::Char('w') => Some(super::operator::TextObject::Word { inner }),
+                    KeyCode::Char('"') => Some(super::operator::TextObject::Quotes { inner }),
+                    KeyCode::Char('{') | KeyCode::Char('}') => Some(super::operator::TextObject::Braces { inner }),
+                    KeyCode::Char('[') | KeyCode::Char(']') => Some(super::operator::TextObject::Brackets { inner }),
+                    _ => None,
+                };
+                
+                if let Some(obj) = text_object {
+                    if let Some(pending) = ctx.pending_operator.take() {
+                        let motion = Motion::TextObject(obj);
+                        self.execute_operator(pending.operator, motion, ctx)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
