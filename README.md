@@ -1,4 +1,4 @@
-# JSON Tool
+# Jim - JSON Interactive Manager
 
 **A streaming, structural, Vim-like JSON editor for gigabyte-scale files**
 

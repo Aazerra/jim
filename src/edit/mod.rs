@@ -160,7 +160,19 @@ impl EditOperations {
         
         // Update cursor position
         cursor.byte_offset = start + new_text.len();
-        // TODO: Update cursor line and col
+        cursor.line = buffer.byte_offset_to_line(cursor.byte_offset);
+        let line_start = buffer.line_to_byte_offset(cursor.line);
+        let offset_in_line = cursor.byte_offset - line_start;
+        let line_text = buffer.get_line(cursor.line);
+        cursor.col = line_text.chars()
+            .take_while(|_| {
+                let bytes: usize = line_text.chars()
+                    .take(cursor.col)
+                    .map(|c| c.len_utf8())
+                    .sum();
+                bytes < offset_in_line
+            })
+            .count();
         
         let cursor_after = CursorState::from(&*cursor);
         

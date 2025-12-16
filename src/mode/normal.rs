@@ -126,17 +126,32 @@ impl ModeHandler for NormalMode {
                 Ok(InputResult::ModeSwitch(Mode::Insert))
             }
             (KeyCode::Char('o'), KeyModifiers::NONE) => {
-                // Open line below
+                // Open line below - move to end of line, insert newline, enter insert mode
                 ctx.cursor.move_end_of_line(ctx.buffer);
-                // TODO: Insert newline and move cursor to new line
-                // For now, just enter insert mode
+                let edit = EditOperations::insert(
+                    ctx.buffer,
+                    ctx.cursor,
+                    ctx.cursor.byte_offset,
+                    "\n",
+                )?;
+                ctx.undo_stack.push(edit);
                 Ok(InputResult::ModeSwitch(Mode::Insert))
             }
             (KeyCode::Char('O'), KeyModifiers::SHIFT) => {
-                // Open line above
+                // Open line above - move to start of line, insert newline, stay on new line
                 ctx.cursor.move_start_of_line(ctx.buffer);
-                // TODO: Insert newline before current line and move cursor
-                // For now, just enter insert mode
+                let insert_pos = ctx.cursor.byte_offset;
+                let edit = EditOperations::insert(
+                    ctx.buffer,
+                    ctx.cursor,
+                    insert_pos,
+                    "\n",
+                )?;
+                ctx.undo_stack.push(edit);
+                // After insert, cursor moved forward - move it back to the new line
+                ctx.cursor.byte_offset = insert_pos;
+                ctx.cursor.line = ctx.buffer.byte_offset_to_line(insert_pos);
+                ctx.cursor.col = 0;
                 Ok(InputResult::ModeSwitch(Mode::Insert))
             }
             (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
@@ -226,15 +241,18 @@ impl ModeHandler for NormalMode {
             
             // Page navigation
             (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                // TODO: Implement gg (go to first line)
-                // For now, just go to start
+                // Go to first line (gg command)
                 ctx.cursor.line = 0;
                 ctx.cursor.col = 0;
                 ctx.cursor.byte_offset = 0;
                 Ok(InputResult::Handled)
             }
             (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
-                // TODO: Implement G (go to last line)
+                // Go to last line
+                let last_line = ctx.buffer.line_count().saturating_sub(1);
+                ctx.cursor.line = last_line;
+                ctx.cursor.col = 0;
+                ctx.cursor.byte_offset = ctx.buffer.line_to_byte_offset(last_line);
                 Ok(InputResult::Handled)
             }
             

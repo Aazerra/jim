@@ -1,8 +1,8 @@
-# JSON Tool - AI Coding Assistant Guide
+# Jim - JSON Interactive Manager - AI Coding Assistant Guide
 
 ## Project Overview
 
-Streaming Vim-like JSON editor in Rust. Handles multi-gigabyte JSON files through lazy parsing and structural navigation. **Phase 0 status**: Early implementation, most code not yet written.
+Jim: Streaming Vim-like JSON editor in Rust. Handles multi-gigabyte JSON files through lazy parsing and structural navigation. **Phase 0 status**: Early implementation, most code not yet written.
 
 ## Architecture
 

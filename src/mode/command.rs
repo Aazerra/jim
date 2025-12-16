@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{EditorContext, InputResult, ModeHandler, Mode};
@@ -36,7 +36,7 @@ impl CommandMode {
             "q" | "quit" => {
                 // Check if buffer is modified
                 if ctx.buffer.is_modified() {
-                    bail!("No write since last change (use :q! to override)")
+                    return Ok(InputResult::Message("No write since last change (use :q! to override)".to_string()));
                 }
                 Ok(InputResult::Quit)
             }
@@ -60,7 +60,7 @@ impl CommandMode {
             }
             _ => {
                 // Unknown command
-                bail!("Unknown command: {}", cmd)
+                Ok(InputResult::Message(format!("Unknown command: {}", cmd)))
             }
         }
     }

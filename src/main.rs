@@ -54,6 +54,9 @@ struct App {
     undo_stack: UndoStack,
     register_map: RegisterMap,
     pending_operator: Option<PendingOperator>,
+    // Message display
+    message: Option<String>,
+    message_time: Option<Instant>,
 }
 
 impl App {
@@ -82,6 +85,8 @@ impl App {
             undo_stack: UndoStack::new(),
             register_map: RegisterMap::new(),
             pending_operator: None,
+            message: None,
+            message_time: None,
         }
     }
 
@@ -126,8 +131,8 @@ impl App {
         if self.structural_index.is_none() {
             self.structural_index = Some(StructuralIndex::from_tokens(&tokens));
         } else {
-            // Append to existing index (TODO: implement append in StructuralIndex)
-            // For now, rebuild from scratch with extended range
+            // Rebuild from scratch with extended range
+            // This is acceptable for now as incremental parsing is a Phase 3+ feature
             let extended_text = self.buffer.get_visible_lines(0, end_line);
             let mut tokenizer = Tokenizer::new(extended_text);
             let tokens = tokenizer.tokenize_all();
@@ -280,6 +285,27 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+            InputResult::Message(msg) => {
+                // Display message for 3 seconds
+                self.message = Some(msg);
+                self.message_time = Some(Instant::now());
+                
+                // Return to normal mode after showing message
+                if matches!(self.mode, Mode::Command) {
+                    self.command_mode_handler.command_line.clear();
+                    self.mode = Mode::Normal;
+                    let mut out = stdout();
+                    let _ = out.execute(SetCursorStyle::SteadyBlock);
+                }
+            }
+        }
+        
+        // Clear message after 3 seconds
+        if let Some(message_time) = self.message_time {
+            if message_time.elapsed().as_secs() >= 3 {
+                self.message = None;
+                self.message_time = None;
             }
         }
         
@@ -762,7 +788,7 @@ fn render_ui(
         // Main content area with border
         let main_block = Block::default()
             .borders(Borders::ALL)
-            .title("JSON Tool v0.1.0 - Phase 0");
+            .title("Jim - JSON Interactive Manager v0.1.0");
         
         let inner_area = main_block.inner(chunks[0]);
         frame.render_widget(main_block, chunks[0]);
@@ -865,28 +891,24 @@ fn render_ui(
             )
         };
         
-        let status = Paragraph::new(status_text)
+        // Override status with command line or message if present
+        let (final_status_text, cursor_in_status) = if matches!(app.mode, Mode::Command) {
+            let cmd_text = format!(":{}", app.command_mode_handler.command_line);
+            let cursor_pos = cmd_text.len();
+            (cmd_text, Some(cursor_pos))
+        } else if let Some(ref msg) = app.message {
+            (msg.clone(), None)
+        } else {
+            (status_text, None)
+        };
+        
+        let status = Paragraph::new(final_status_text)
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
         frame.render_widget(status, chunks[1]);
         
-        // Command line (when in command mode)
-        if matches!(app.mode, Mode::Command) {
-            let cmd_text = format!(":{}", app.command_mode_handler.command_line);
-            let cmd_len = cmd_text.len();
-            let cmd_line = Paragraph::new(cmd_text)
-                .style(Style::default().bg(Color::Black).fg(Color::White));
-            
-            // Render at the bottom of the status bar area
-            let cmd_area = ratatui::layout::Rect {
-                x: chunks[1].x,
-                y: chunks[1].y,
-                width: chunks[1].width,
-                height: 1,
-            };
-            frame.render_widget(cmd_line, cmd_area);
-            
-            // Set cursor position at end of command line
-            let cursor_x = chunks[1].x + cmd_len as u16;
+        // Set cursor in status bar if in command mode
+        if let Some(cursor_pos) = cursor_in_status {
+            let cursor_x = chunks[1].x + cursor_pos as u16;
             let cursor_y = chunks[1].y;
             frame.set_cursor_position((cursor_x, cursor_y));
         }

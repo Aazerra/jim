@@ -1,7 +1,11 @@
 [package]
-name = "json-tool"
+name = "jim"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "jim"
+path = "src/main.rs"
 
 [dependencies]
 # TUI Framework
@@ -30,10 +34,6 @@ proptest = "1.4"
 [[bench]]
 name = "scroll_bench"
 harness = false
-
-[[bin]]
-name = "json-tool"
-path = "src/main.rs"
 
 [[bin]]
 name = "generate_test_data"

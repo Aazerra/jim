@@ -63,6 +63,8 @@ pub enum InputResult {
     StructuralNav(StructuralNavAction),
     /// Request to clear node tracking (cursor moved manually)
     ClearNodeTracking,
+    /// Display a message to the user
+    Message(String),
 }
 
 /// Structural navigation actions
