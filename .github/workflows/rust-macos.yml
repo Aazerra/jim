@@ -1,0 +1,25 @@
+name: macOS build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build (Intel)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build (Apple Silicon)
+        run: cargo build --release --target aarch64-apple-darwin
