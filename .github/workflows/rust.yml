@@ -22,28 +22,28 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: jim
-            artifact: myapp-linux-x86_64.tar.gz
+            artifact: jim-linux-x86_64.tar.gz
 
           # -------- Windows --------
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: jim.exe
-            artifact: myapp-windows-x86_64.tar.gz
+            artifact: jim-windows-x86_64.tar.gz
 
           # -------- macOS Intel --------
           - name: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
             bin: jim
-            artifact: myapp-macos-x86_64.tar.gz
+            artifact: jim-macos-x86_64.tar.gz
 
           # -------- macOS Apple Silicon --------
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
             bin: jim
-            artifact: myapp-macos-aarch64.tar.gz
+            artifact: jim-macos-aarch64.tar.gz
 
     steps:
       - uses: actions/checkout@v4
