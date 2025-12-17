@@ -876,9 +876,21 @@ fn render_ui(
             
             // Modified indicator
             let modified = if app.buffer.is_modified() { " [+]" } else { "" };
+            
+            // If loading a large file, show loading progress
+            let mut progress_suffix = String::new();
+            if app.buffer.load_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                let pct = app.buffer.load_progress.load(std::sync::atomic::Ordering::Relaxed);
+                let bar_len = 10usize;
+                let filled = ((pct as usize * bar_len) / 100).min(bar_len);
+                let mut bar = String::new();
+                for i in 0..bar_len {
+                    if i < filled { bar.push('#'); } else { bar.push('-'); }
+                }
+                progress_suffix = format!(" | Loading: [{}] {}%", bar, pct);
+            }
             // If a background save is in progress, show a small progress bar
-            let mut save_suffix = String::new();
-            if app.buffer.is_saving() {
+            else if app.buffer.is_saving() {
                 let pct = app.buffer.save_progress_percent();
                 let bar_len = 10usize;
                 let filled = ((pct as usize * bar_len) / 100).min(bar_len);
@@ -886,7 +898,7 @@ fn render_ui(
                 for i in 0..bar_len {
                     if i < filled { bar.push('#'); } else { bar.push('-'); }
                 }
-                save_suffix = format!(" | Saving: [{}] {}%", bar, pct);
+                progress_suffix = format!(" | Saving: [{}] {}%", bar, pct);
             }
 
             format!(
@@ -900,7 +912,7 @@ fn render_ui(
                 node_info,
                 mode_str,
                 app.fps,
-                save_suffix
+                progress_suffix
             )
         };
         

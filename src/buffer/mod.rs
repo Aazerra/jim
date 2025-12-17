@@ -53,6 +53,10 @@ pub struct Buffer {
     save_in_progress: Arc<AtomicBool>,
     save_pending: bool,
     
+    // Load progress reporting
+    pub load_progress: Arc<AtomicU32>,
+    pub load_in_progress: Arc<AtomicBool>,
+    
     path: Option<PathBuf>,
     modified: bool,
 }
@@ -72,6 +76,8 @@ impl Buffer {
             save_progress: Arc::new(AtomicU32::new(0)),
             save_in_progress: Arc::new(AtomicBool::new(false)),
             save_pending: false,
+            load_progress: Arc::new(AtomicU32::new(0)),
+            load_in_progress: Arc::new(AtomicBool::new(false)),
             path: None,
             modified: false,
         }
@@ -96,7 +102,17 @@ impl Buffer {
             self.line_offsets.clear();
         } else {
             // Large file: build line index only (lazy loading)
-            self.line_offsets = Self::build_line_index(&mmap);
+            // Show progress for files that take >1 second to index
+            self.load_in_progress.store(true, Ordering::SeqCst);
+            self.load_progress.store(0, Ordering::SeqCst);
+            
+            self.line_offsets = Self::build_line_index_with_progress(
+                &mmap, 
+                &self.load_progress
+            );
+            
+            self.load_progress.store(100, Ordering::SeqCst);
+            self.load_in_progress.store(false, Ordering::SeqCst);
             self.use_rope = false;
             self.rope = None;
         }
@@ -123,6 +139,28 @@ impl Buffer {
         for (i, &byte) in mmap.iter().enumerate() {
             if byte == b'\n' {
                 offsets.push(i + 1);  // Next line starts after \n
+            }
+        }
+        
+        offsets
+    }
+    
+    /// Build line index with progress reporting (for large files)
+    fn build_line_index_with_progress(mmap: &Mmap, progress: &Arc<AtomicU32>) -> Vec<usize> {
+        let mut offsets = vec![0];
+        let total_bytes = mmap.len();
+        let mut last_progress = 0u32;
+        
+        for (i, &byte) in mmap.iter().enumerate() {
+            if byte == b'\n' {
+                offsets.push(i + 1);
+            }
+            
+            // Update progress every 1% (to avoid excessive atomic writes)
+            let current_progress = ((i as f64 / total_bytes as f64) * 100.0) as u32;
+            if current_progress > last_progress {
+                progress.store(current_progress, Ordering::Relaxed);
+                last_progress = current_progress;
             }
         }
         
