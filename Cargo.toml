@@ -15,7 +15,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # Buffer & Text Management
 ropey = "1.6"
 memmap2 = "0.9"
-
+reflink-copy = "0.1"
 # Async Runtime
 tokio = { version = "1", features = ["full"] }
 

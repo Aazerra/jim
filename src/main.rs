@@ -850,7 +850,7 @@ fn render_ui(
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str())
                 .unwrap_or("<unknown>");
-            let file_size = format_size(app.buffer.file_size());
+            let file_size = format_size(app.buffer.get_file_size());
             
             // Get node type if available
             let node_info = if let (Some(node_id), Some(ref index)) = (app.current_node_id, &app.structural_index) {
@@ -876,9 +876,21 @@ fn render_ui(
             
             // Modified indicator
             let modified = if app.buffer.is_modified() { " [+]" } else { "" };
-            
+            // If a background save is in progress, show a small progress bar
+            let mut save_suffix = String::new();
+            if app.buffer.is_saving() {
+                let pct = app.buffer.save_progress_percent();
+                let bar_len = 10usize;
+                let filled = ((pct as usize * bar_len) / 100).min(bar_len);
+                let mut bar = String::new();
+                for i in 0..bar_len {
+                    if i < filled { bar.push('#'); } else { bar.push('-'); }
+                }
+                save_suffix = format!(" | Saving: [{}] {}%", bar, pct);
+            }
+
             format!(
-                " {}{} ({}) | {}:{} | {}{} |{} FPS: {:.1} | F12: perf",
+                " {}{} ({}) | {}:{} | {}{} |{} FPS: {:.1}{} | F12: perf",
                 file_name,
                 modified,
                 file_size,
@@ -887,7 +899,8 @@ fn render_ui(
                 cursor_pos,
                 node_info,
                 mode_str,
-                app.fps
+                app.fps,
+                save_suffix
             )
         };
         
@@ -963,6 +976,12 @@ fn run(mut app: App, mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result
     loop {
         let frame_start = Instant::now();
         
+        // If a background save just finished, finalize (reload mmap)
+        if let Err(e) = app.buffer.finalize_save() {
+            // show message (non-fatal)
+            eprintln!("Failed to finalize save: {:?}", e);
+        }
+
         app.update_fps();
         render_ui(&mut terminal, &mut app)?;
         
